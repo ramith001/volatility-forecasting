@@ -69,6 +69,34 @@ The implementation is validated before being trusted on real data: a return seri
 
 ---
 
+## Part 1: Extended Date Range and Completed S&P 500 Comparison
+
+The original run covered 2014 to 2024 and left the S&P 500 side of the comparison for future work. This extends both tickers through October 2026 and completes that comparison.
+
+With two more years of data, GARCH now outperforms the ML model on both tickers, a reversal from the original finding (GARCH RMSE 9.86 vs ML RMSE 8.46 at the time):
+
+| Ticker | GARCH RMSE | ML RMSE |
+|---|---|---|
+| JPM | 4.17 | 4.82 |
+| S&P 500 | 3.47 | 4.70 |
+
+Error on JPM roughly halved, from the original ~9-10 RMSE range down to ~4-5. The 250-day test window now falls in a comparatively calm stretch (October 2025 to October 2026), which plausibly explains part of the drop rather than a change in either model's underlying accuracy -- a reminder that a single out-of-sample window reflects the period it happens to cover.
+
+VaR calibration also moved closer to target: 10 breaches in 209 test days (4.78%), close to the 5% nominal rate, versus 2.87% (noticeably over-conservative) in the original run.
+
+The leakage check still holds at the extended range: lag-1 realized volatility correlates with the forward realized-vol target at 0.26 (JPM) and 0.22 (S&P 500), both well below the ~0.97 threshold that would indicate a leak.
+
+---
+
+## Files
+
+- `volatility_forecasting.ipynb` -- the original JPM-only, 2014-2024 notebook, left untouched.
+- `garch_utils.py` -- the GARCH(1,1), realized-volatility and ML-feature functions factored out of the original notebook (bodies unchanged), plus `run_full_pipeline()` to run the whole per-ticker comparison on any ticker or date range.
+- `part1_extended_and_sp500.ipynb` -- Part 1: both tickers through October 2026, using `garch_utils.py`.
+- `chart_extended_jpm_vs_sp500.png` -- GARCH vs. ML RMSE, JPM vs. S&P 500, extended period.
+
+---
+
 ## Stack
 
 - **Language:** Python 3.13
