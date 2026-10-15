@@ -15,7 +15,10 @@ risk from this refactor.
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
-from scipy.stats import norm
+from scipy.signal import lfilter
+from scipy.special import gammaln
+from scipy.stats import chi2, norm
+from scipy.stats import t as student_t
 
 
 def compute_returns_and_vol(df, window=21):
@@ -211,3 +214,131 @@ def run_full_pipeline(df, ticker_name, test_size=250, horizon=21, n_lags=5,
         result['n_test_days'] = int(len(comparison))
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Part 2: Student-t innovations and VaR coverage tests
+#
+# Everything above is the Part 1 module and is unchanged. Everything below is
+# new in Part 2. The conditional-variance recursion is the same one
+# garch_neg_log_likelihood uses, computed with scipy.signal.lfilter instead of
+# a Python loop (it is a first-order linear filter), because the t model has a
+# 4th parameter and is refit hundreds of times in the rolling backtest. The
+# notebook checks that the vectorised path matches the loop.
+# ---------------------------------------------------------------------------
+def garch_variance_path(returns, omega, alpha, beta):
+    """sigma2[t] for t = 0..n-1 with sigma2[0] = var(returns): the same recursion as
+    garch_neg_log_likelihood, vectorised."""
+    r = np.asarray(returns, dtype=float)
+    s0 = np.var(r)
+    x = omega + alpha * r[:-1] ** 2
+    y, _ = lfilter([1.0], [1.0, -beta], x, zi=[beta * s0])
+    return np.concatenate([[s0], y])
+
+
+def garch_t_neg_log_likelihood(params, returns):
+    """
+    Negative log-likelihood for GARCH(1,1) with Student-t innovations, scaled to unit
+    variance so that sigma2_t stays the conditional variance (same meaning as under
+    normal innovations; only the tail shape changes):
+        r_t = sigma_t * z_t,  z_t ~ t_nu / sqrt(nu / (nu - 2)),  nu > 2
+    As nu -> infinity this converges to garch_neg_log_likelihood.
+    """
+    omega, alpha, beta, nu = params
+    r = np.asarray(returns, dtype=float)
+    sigma2 = np.maximum(garch_variance_path(r, omega, alpha, beta), 1e-8)
+    const = gammaln((nu + 1) / 2) - gammaln(nu / 2) - 0.5 * np.log(np.pi * (nu - 2))
+    ll = len(r) * const - 0.5 * np.sum(np.log(sigma2)) \
+        - (nu + 1) / 2 * np.sum(np.log1p(r ** 2 / ((nu - 2) * sigma2)))
+    return -ll
+
+
+NU_MIN, NU_MAX = 2.05, 200.0  # nu bounded away from 2 (infinite variance) and from the normal limit
+
+
+def fit_garch_t(returns, start=None):
+    """Fit GARCH(1,1)-t via MLE, returns (omega, alpha, beta, nu). `start` = (omega, alpha, beta)
+    from the normal fit is used as the starting point when given (nu starts at 8)."""
+    bounds = [(1e-6, None), (0, 1), (0, 1), (NU_MIN, NU_MAX)]
+    constraints = [{'type': 'ineq', 'fun': lambda p: 0.999 - p[1] - p[2]}]  # stationarity
+    x0 = [*(start if start is not None else (0.1, 0.1, 0.8)), 8.0]
+    result = minimize(garch_t_neg_log_likelihood, x0, args=(returns,), method='SLSQP',
+                       bounds=bounds, constraints=constraints, options={'maxiter': 300})
+    return result.x
+
+
+def standardized_residuals(returns, omega, alpha, beta):
+    r = np.asarray(returns, dtype=float)
+    return r / np.sqrt(np.maximum(garch_variance_path(r, omega, alpha, beta), 1e-8))
+
+
+def log_density_normal(r, sigma2):
+    return -0.5 * (np.log(2 * np.pi) + np.log(sigma2) + r ** 2 / sigma2)
+
+
+def log_density_t(r, sigma2, nu):
+    const = gammaln((nu + 1) / 2) - gammaln(nu / 2) - 0.5 * np.log(np.pi * (nu - 2))
+    return const - 0.5 * np.log(sigma2) - (nu + 1) / 2 * np.log1p(r ** 2 / ((nu - 2) * sigma2))
+
+
+def var_threshold(sigma, level, dist, nu=None):
+    """One-day return threshold (negative number, same units as sigma) such that a return below it is a
+    VaR breach at `level` (0.95 -> 5% tail). For the t, the quantile is rescaled to unit variance."""
+    if dist == 'normal':
+        return -norm.ppf(level) * sigma
+    return -student_t.ppf(level, nu) * np.sqrt((nu - 2) / nu) * sigma
+
+
+def kupiec_pof(n_breaches, n, p):
+    """Kupiec proportion-of-failures LR test of the breach rate against the nominal rate p. -> (LR, p-value)."""
+    x, pi = n_breaches, n_breaches / n
+    ll0 = (n - x) * np.log(1 - p) + x * np.log(p)
+    ll1 = (n - x) * np.log(1 - pi) + (x * np.log(pi) if x > 0 else 0.0)
+    lr = -2 * (ll0 - ll1)
+    return lr, float(chi2.sf(lr, 1))
+
+
+def christoffersen(hits, p):
+    """Christoffersen (1998) tests on a 0/1 breach sequence: independence (are breaches clustered?) and
+    conditional coverage (POF + independence). -> dict with LR and p-values. NaN when a transition state
+    never occurs (too few breaches to test)."""
+    h = np.asarray(hits, dtype=int)
+    n00 = int(np.sum((h[:-1] == 0) & (h[1:] == 0)))
+    n01 = int(np.sum((h[:-1] == 0) & (h[1:] == 1)))
+    n10 = int(np.sum((h[:-1] == 1) & (h[1:] == 0)))
+    n11 = int(np.sum((h[:-1] == 1) & (h[1:] == 1)))
+    x, n = int(h.sum()), len(h)
+    if n01 + n11 == 0 or n00 + n01 == 0 or n10 + n11 == 0:
+        return {'lr_ind': np.nan, 'p_ind': np.nan, 'lr_cc': np.nan, 'p_cc': np.nan}
+
+    def term(k, m):
+        return k * np.log(m) if k > 0 else 0.0
+    pi01, pi11, pi = n01 / (n00 + n01), n11 / (n10 + n11), (n01 + n11) / (n00 + n01 + n10 + n11)
+    ll_ind1 = term(n00, 1 - pi01) + term(n01, pi01) + term(n10, 1 - pi11) + term(n11, pi11)
+    ll_ind0 = term(n00 + n10, 1 - pi) + term(n01 + n11, pi)
+    lr_ind = -2 * (ll_ind0 - ll_ind1)
+    lr_pof, _ = kupiec_pof(x, n, p)
+    lr_cc = lr_pof + lr_ind
+    return {'lr_ind': lr_ind, 'p_ind': float(chi2.sf(lr_ind, 1)),
+            'lr_cc': lr_cc, 'p_cc': float(chi2.sf(lr_cc, 2))}
+
+
+def rolling_normal_vs_t(returns, train_window=750, test_size=750):
+    """
+    For each of the last `test_size` days, refit BOTH GARCH(1,1)-normal (fit_garch, as in Part 1) and
+    GARCH(1,1)-t on the previous `train_window` days and record each model's one-day-ahead conditional
+    variance (daily, in percent^2), the fitted nu, and the realized return that day. The t fit starts
+    from the normal fit's parameters. Returns a DataFrame indexed by date.
+    """
+    r_all = returns.values * 100
+    n = len(r_all)
+    rows = []
+    for i in range(n - test_size, n):
+        train = r_all[max(0, i - train_window):i]
+        w, a, b = fit_garch(train)
+        s2_n = w + a * train[-1] ** 2 + b * garch_variance_path(train, w, a, b)[-1]
+        wt, at, bt, nu = fit_garch_t(train, start=(w, a, b))
+        s2_t = wt + at * train[-1] ** 2 + bt * garch_variance_path(train, wt, at, bt)[-1]
+        rows.append({'date': returns.index[i], 'ret': r_all[i], 'sigma2_normal': s2_n,
+                     'sigma2_t': s2_t, 'nu': nu})
+    return pd.DataFrame(rows).set_index('date')
