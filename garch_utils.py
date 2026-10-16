@@ -342,3 +342,33 @@ def rolling_normal_vs_t(returns, train_window=750, test_size=750):
         rows.append({'date': returns.index[i], 'ret': r_all[i], 'sigma2_normal': s2_n,
                      'sigma2_t': s2_t, 'nu': nu})
     return pd.DataFrame(rows).set_index('date')
+
+
+# ── Part 3: multi-window VaR backtest ────────────────────────────────────────────────────────
+
+def block_slices(n_days, block_len=750, n_blocks=3):
+    """Non-overlapping blocks of `block_len` days, aligned to the END of a series of `n_days`, oldest first.
+    Returns {label: slice}. Aligning to the end makes the last block identical to Part 2's 750-day window."""
+    out = {}
+    for k in range(n_blocks):
+        stop = n_days - (n_blocks - 1 - k) * block_len
+        out[f'block {k + 1}'] = slice(stop - block_len, stop)
+    return out
+
+
+def var_hits(d, level, dist):
+    """0/1 VaR breach series from a rolling_normal_vs_t frame, for dist 'normal' or 't'."""
+    if dist == 'normal':
+        thr = var_threshold(np.sqrt(d['sigma2_normal']), level, 'normal')
+    else:
+        thr = var_threshold(np.sqrt(d['sigma2_t']), level, 't', nu=d['nu'])
+    return (d['ret'] < thr).values.astype(int)
+
+
+def coverage_row(hits, p):
+    """Breach count, rate and Kupiec / Christoffersen p-values for one 0/1 breach sequence."""
+    x, n = int(hits.sum()), len(hits)
+    _, p_pof = kupiec_pof(x, n, p)
+    c = christoffersen(hits, p)
+    return {'n_days': n, 'breaches': x, 'expected': round(p * n, 1), 'breach_rate_%': 100 * x / n,
+            'nominal_%': 100 * p, 'kupiec_p': p_pof, 'indep_p': c['p_ind'], 'cond_cov_p': c['p_cc']}
