@@ -8,66 +8,49 @@
 
 ## Overview
 
-Volatility forecasting sits at the core of risk management, options pricing, and portfolio construction at any bank or trading desk. This project builds and rigorously compares two approaches to forecasting volatility on real market data:
+Volatility forecasting sits at the core of risk management, options pricing and portfolio construction. This project builds a GARCH(1,1) model from scratch and compares it, over eight parts, with machine learning alternatives on real market data, then tests how far the conclusions hold up when the assets, windows, models and horizons change.
 
-1. **GARCH(1,1)**, the industry standard econometric model for volatility clustering, implemented from scratch via Maximum Likelihood Estimation, validated against simulated data with known parameters before being applied to real prices
-2. **A machine learning alternative** (Gradient Boosting), using lagged realized volatility and return features
+- **GARCH(1,1)**, implemented directly by maximum likelihood with `scipy.optimize` and validated against simulated data with known parameters, then extended to Student-t innovations (Part 2) and to the asymmetric GJR-GARCH and EGARCH models (Part 5).
+- **Machine learning alternatives:** Gradient Boosting on lagged returns and volatilities (Part 1), then richer feature sets, HAR, Ridge and a GRU written in numpy (Part 6), and averages of GARCH with the ML forecasts (Part 7).
+- **Evaluation:** out-of-sample 21-day volatility forecasts against realized volatility (Parts 1, 4, 6, 7), 5-, 10- and 21-day horizons (Part 8), and Value at Risk backtests with Kupiec and Christoffersen coverage tests, including three non-overlapping 750-day blocks (Parts 1 to 3).
 
-Both forecasts are evaluated out-of-sample against actual realized volatility, and the GARCH model is used to compute a Value at Risk (VaR) estimate, properly backtested for breach frequency, the same basic validation real risk teams run on their own models.
-
-**Data:** JPMorgan Chase (JPM) and the S&P 500 (^GSPC), 2014-2024, via Yahoo Finance.
-
----
-
-## A Methodological Issue Worth Documenting
-
-An early version of this comparison produced a result that looked too good to be true: the ML model beat GARCH by close to 10x on RMSE. Rather than report that number, it was investigated properly.
-
-The cause was a subtle but real data leakage problem. The original evaluation target, tomorrow's 21-day trailing realized volatility, overlapped with the ML model's own lagged input feature (yesterday's 21-day trailing realized volatility) on 20 of their 21 underlying days. The two values were correlated at roughly 0.97 purely from that overlap, regardless of any genuine predictive relationship, meaning the ML model's apparent accuracy was largely an artifact of being handed a near-copy of the answer.
-
-The fix: both models were re-evaluated against a genuinely forward-looking, non-overlapping target, realized volatility over the next 21 days starting tomorrow, computed only from data not yet seen by either model. GARCH was extended to forecast its own 21-day-ahead average variance (the standard GARCH variance term structure) rather than a single one-day-ahead number, so both models are judged on the same, fairly defined task. After the fix, GARCH and ML RMSE came out close (9.86 vs 8.46), a believable, modest gap rather than an implausible one.
-
-A second, smaller issue surfaced once the first was fixed: the Value at Risk section was then using the smoothed 21-day average forecast for what should be a sharp, single-day risk estimate. This was fixed by having the rolling GARCH function output both a true 1-day-ahead forecast and the 21-day average forecast from the same fitted model, since both come from the same parameters at effectively no extra computational cost, and using the correct one for each purpose.
-
-This is included here deliberately. Catching a result that looks suspiciously good, diagnosing why, and fixing the underlying methodology rather than reporting a misleading number is a real and recurring part of applied data science work.
+**Data:** Yahoo Finance daily prices from January 2014 to 13 October 2026 (the end date is pinned in each notebook). Parts 1 to 3 use JPMorgan Chase (JPM) and the S&P 500 (^GSPC). Part 4 onward adds Apple, Exxon, emerging-market equities (EEM), REITs (VNQ), gold (GLD), long Treasuries (TLT), EUR/USD and Bitcoin; Parts 5 to 8 use subsets of these ten. Bitcoin trades every day, so its windows cover fewer calendar years.
 
 ---
 
-## GARCH(1,1) Implemented from Scratch
+## Evaluation Design
 
-Rather than rely on a packaged library, GARCH(1,1) is implemented directly via Maximum Likelihood Estimation using `scipy.optimize`. This was a practical necessity as much as a design choice: the standard `arch` package has no prebuilt wheel for Windows on ARM, and compiling it from source requires a full Visual Studio build toolchain. Implementing the model directly avoided that dependency entirely.
+**Target.** The 21-day target is the annualized realized volatility over days t+1 to t+21, known at the close of day t. It must not overlap the model's own inputs: an early version scored a target that shared 20 of 21 days with the ML model's lagged volatility feature (correlation about 0.97) and showed the ML model about ten times better than GARCH, which was the overlap and not skill. The original notebook and Part 1 use `compute_forward_realized_vol`, which returns the volatility over days t+21 to t+41; Parts 4 onward use `compute_forward_realized_vol_aligned`, which matches the definition above (see the note at the top). The Part 1 section reports the original figures.
 
-The implementation is validated before being trusted on real data: a return series is simulated from known GARCH(1,1) parameters (omega=0.05, alpha=0.10, beta=0.85), and the fitting procedure is confirmed to recover those parameters closely (fitted: omega=0.0871, alpha=0.1006, beta=0.8024) before being applied to JPMorgan Chase and S&P 500 price data.
+**Timing.** Every forecast is made at the close of day t from data through day t. GARCH is refit every day on the trailing 750 returns, and its forecast for the next h days is the average of the variance term structure: the one-step-ahead variance from the last return and conditional variance, then `sigma2_{t+k} = omega + (alpha + beta) sigma2_{t+k-1}`. ML models are trained once per 250-day block on rows whose forward window ended before the block began (a 22-day embargo), and their features at day t use only data through day t, which is checked with a truncation test.
 
----
+**Blocks and tests.** Parts 4 to 8 score the last 750 days with a complete forward window as three non-overlapping 250-day blocks. Consecutive 21-day targets overlap, so losses are compared with Diebold-Mariano tests using a Newey-West variance. VaR uses the one-day-ahead variance from the same fit (not the 21-day average), a 750-day refit window and zero-mean returns, and is scored with the Kupiec proportion-of-failures test and the Christoffersen independence and conditional-coverage tests.
 
-## Methodology
-
-**Returns and realized volatility.** Daily log returns are computed from closing prices. Realized volatility is the rolling 21-day standard deviation of returns, annualized.
-
-**GARCH(1,1) fitting.** Fit via MLE, refitting on a rolling basis across the out-of-sample test window. The fitted parameters feed a variance term structure: a one-step-ahead forecast using the last known return and variance, then each subsequent day forecast using the property that expected future squared returns equal the forecast variance itself, the standard technique for multi-day-ahead GARCH forecasts.
-
-**Machine learning model.** Gradient Boosting trained on lagged realized volatility, lagged returns, and short-window return statistics, predicting a non-overlapping, forward-looking 21-day realized volatility target.
-
-**Value at Risk backtesting.** A 95% one-day VaR threshold is computed from the GARCH model's true one-day-ahead forecast, then backtested: if well calibrated, actual daily losses should exceed the threshold roughly 5% of the time.
+**Implementation note.** GARCH(1,1) is implemented directly because the `arch` package has no prebuilt wheel for Windows on ARM. The fitting procedure recovers known parameters on simulated data (true omega 0.05, alpha 0.10, beta 0.85; fitted 0.0871, 0.1006, 0.8024).
 
 ---
 
 ## Key Findings
 
-**GARCH and ML perform comparably once evaluated fairly.** GARCH RMSE of 9.86 percentage points versus ML RMSE of 8.46, a modest, believable gap consistent with general findings in volatility forecasting research, rather than the artifact-driven 10x gap seen before the leakage was caught and fixed.
+**VaR (Parts 1 to 3).** Over three non-overlapping 750-day blocks (October 2017 to October 2026), 95% VaR from normal GARCH is close to nominal on JPM (pooled breach rate 4.80%) and over-breached on the S&P 500 (6.00%, Kupiec p = 0.035). At 99% it under-covers: pooled over 2,250 days JPM has 39 breaches against 22.5 expected (p = 0.0015) and the S&P 500 47 (p < 0.0001). Student-t innovations fit far better (likelihood-ratio statistics 325 for JPM and 193 for the S&P 500) and fix much of the 99% shortfall in the earlier, more volatile blocks (JPM 29 breaches pooled, p = 0.19; S&P 500 33, p = 0.038), but not in the most recent block. Asymmetric models do not fix the JPM 99% shortfall either (Part 5).
 
-**The VaR model is conservative.** Backtested breach rate of 2.87% against an expected 5% for a 95% VaR threshold, meaning the model under-predicts risk slightly, fewer large losses occurred than the threshold implied should happen. This is a common, real characteristic of GARCH-based VaR models in practice, and is reported honestly rather than adjusted to look more precisely calibrated than it is.
+**GARCH against ML (Parts 4, 6, 7).** On ten assets, GARCH beats the Part 1 Gradient Boosting model on 8 of 10 (GARCH has the lowest RMSE in 18 of 30 asset-blocks, ML in 8, the naive forecast in 4), but only Bitcoin is statistically separated, and in the most recent block the two are level. The ranking depends on the ML model: Ridge on richer features and a GRU are about 6% below GARCH's error on six assets, HAR about 4% below, and Gradient Boosting gets worse as features are added (4% to 17% above). The errors of GARCH and the ML models are correlated 0.8 to 0.9, so averaging adds little beyond what the better ML models give alone, and weights learned from the previous block do worse than a fixed 50/50 average.
+
+**Leverage (Part 5).** GJR-GARCH and EGARCH improve the fit by a large margin on US equities (AIC lower by 123 and 151 for the S&P 500), find nothing in long Treasuries and EUR/USD and an opposite-sign effect in gold, and improve out-of-sample forecasts only slightly and not significantly.
+
+**Horizon and calibration (Part 8).** At 5, 10 and 21 days GARCH is level with HAR and ahead of the naive forecast. Its forecasts are too spread out: a regression of realized on forecast volatility has a slope of 0.50 to 0.61, and GARCH over-forecasts by 0.7 to 2.0 percentage points on average, which the ML models and HAR avoid by shrinking toward the mean.
 
 ---
 
 ## Known Limitations
 
-**Single ticker depth.** The full GARCH-vs-ML comparison and VaR backtest were run in depth on JPMorgan Chase specifically; the S&P 500 data was collected and processed but not carried through the full rolling forecast pipeline. Extending the full comparison to the index, and to other individual stocks, is a natural next step.
+**Assets and period.** Ten assets and about twelve years from one data source, with three scored blocks per asset. Adjusted prices from Yahoo are revised from time to time, so re-running a notebook can move a number in the last digits (differences seen were below 0.001 percentage points and none changed a count). Bitcoin and EUR/USD trade on different calendars from equities.
 
-**Normal innovations assumption.** The GARCH likelihood in the original and Part 1 runs assumes normally distributed return shocks. Part 2 implements Student-t innovations and compares the two (see below): the t model fits far better, but it does not fix the 99% VaR under-coverage, so the remaining gap is not just tail shape. Asymmetric (leverage) effects are tried in Part 5, where they do not fix the 99% VaR shortfall either; skewed innovations were not tried.
+**Models.** GARCH(1,1) and its GJR and EGARCH variants only: no realized-measure models, no skewed innovations. The ML models were not tuned (Part 1's Gradient Boosting settings were kept, the GRU is small and was averaged over three seeds, and Ridge's penalty was fixed), so a tuned ML model could do differently. The finding that boosting got worse with more features is not explained here.
 
-**VaR backtesting depth.** The original Kupiec-style check used one 209-day out-of-sample period, and Part 2 extended it to a single 750-day window. Part 3 repeats the backtest on three non-overlapping 750-day blocks (October 2017 to October 2026, including the COVID crash), which settles the "single calm window" concern, but it is still only three blocks, two tickers and one rolling-window design (a 750-day refit window, zero-mean returns, GARCH(1,1) only). With 24 block-level tests, about one rejection is expected by chance, and the blocks share training data at their edges. 213 early days could not be scored because the first test day needs 750 days of training data behind it.
+**Evaluation depth.** Three blocks per asset, overlapping 21-day targets (so the Diebold-Mariano p-values are approximate), and 24 block-level VaR tests in Part 3 (about one rejection is expected by chance; seven occurred, two survive a Holm adjustment). The VaR design is one rolling-window choice (750 days, zero mean). 213 early days could not be scored in Part 3 because the first test day needs 750 days of training data.
+
+**Open questions.** JPM's fitted GARCH persistence (median 0.75) is far below what its realized-volatility autocorrelation would suggest (Part 8), and the large upward bias of GARCH's multi-day forecasts was found but not traced to a cause.
 
 ---
 
