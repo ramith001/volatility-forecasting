@@ -544,3 +544,155 @@ def score_forecasts(actual, forecast):
     e = np.asarray(forecast, dtype=float) - np.asarray(actual, dtype=float)
     return {'rmse': float(np.sqrt(np.mean(e ** 2))), 'mae': float(np.mean(np.abs(e))), 'bias': float(np.mean(e))}
 
+
+# ---------------------------------------------------------------------------
+# Part 5: leverage effects. GJR-GARCH(1,1) and EGARCH(1,1), fit by maximum likelihood like the symmetric model.
+#
+#   GJR:    sigma2_t = omega + (alpha + gamma * 1[r_{t-1} < 0]) * r_{t-1}^2 + beta * sigma2_{t-1}
+#           gamma > 0 means negative returns raise volatility more than positive ones of the same size.
+#           Stationary when alpha + gamma/2 + beta < 1 (a negative return has probability 1/2 under symmetry).
+#   EGARCH: ln sigma2_t = omega + beta * ln sigma2_{t-1} + alpha * (|z_{t-1}| - E|z|) + gamma * z_{t-1},
+#           z = r / sigma. gamma < 0 means negative returns raise volatility more. No positivity constraints.
+# All returns are in percent, as everywhere else in this module. The GJR recursion is a linear filter in sigma2
+# (the drive depends only on past returns), so it uses lfilter like the symmetric model; the EGARCH recursion
+# is not (z depends on sigma), so it is a Python loop.
+# ---------------------------------------------------------------------------
+def gjr_variance_path(returns, omega, alpha, gamma, beta):
+    n = len(returns)
+    drive = np.empty(n)
+    drive[0] = np.var(returns)
+    drive[1:] = omega + (alpha + gamma * (returns[:-1] < 0)) * returns[:-1] ** 2
+    return lfilter([1.0], [1.0, -beta], drive)
+
+
+def gjr_neg_log_likelihood(params, returns):
+    omega, alpha, gamma, beta = params
+    s2 = np.maximum(gjr_variance_path(returns, omega, alpha, gamma, beta), 1e-8)
+    return 0.5 * np.sum(np.log(2 * np.pi) + np.log(s2) + returns ** 2 / s2)
+
+
+def fit_gjr(returns):
+    """GJR-GARCH(1,1), normal innovations. Returns (omega, alpha, gamma, beta)."""
+    bounds = [(1e-6, None), (0, 1), (-1, 1), (0, 1)]
+    cons = [{'type': 'ineq', 'fun': lambda p: 0.999 - p[1] - p[2] / 2 - p[3]},
+            {'type': 'ineq', 'fun': lambda p: p[1] + p[2]}]
+    best = None
+    for start in ([0.05, 0.03, 0.08, 0.88], [0.1, 0.1, 0.0, 0.8]):
+        res = minimize(gjr_neg_log_likelihood, start, args=(returns,), method='SLSQP', bounds=bounds,
+                       constraints=cons, options={'maxiter': 300})
+        if best is None or res.fun < best.fun:
+            best = res
+    return best.x
+
+
+def gjr_t_neg_log_likelihood(params, returns):
+    omega, alpha, gamma, beta, nu = params
+    s2 = np.maximum(gjr_variance_path(returns, omega, alpha, gamma, beta), 1e-8)
+    return -np.sum(log_density_t(returns, s2, nu))
+
+
+def fit_gjr_t(returns, start=None):
+    """GJR-GARCH(1,1) with unit-variance Student-t innovations. Returns (omega, alpha, gamma, beta, nu)."""
+    s = list(start) if start is not None else list(fit_gjr(returns))
+    bounds = [(1e-6, None), (0, 1), (-1, 1), (0, 1), (2.05, 200)]
+    cons = [{'type': 'ineq', 'fun': lambda p: 0.999 - p[1] - p[2] / 2 - p[3]},
+            {'type': 'ineq', 'fun': lambda p: p[1] + p[2]}]
+    res = minimize(gjr_t_neg_log_likelihood, s + [8.0], args=(returns,), method='SLSQP', bounds=bounds,
+                   constraints=cons, options={'maxiter': 400})
+    return res.x
+
+
+_EG_C = np.sqrt(2 / np.pi)  # E|z| for a standard normal
+
+
+def egarch_logvar_path(returns, omega, alpha, gamma, beta):
+    n = len(returns)
+    lv = np.empty(n)
+    lv[0] = np.log(np.var(returns))
+    for t in range(1, n):
+        z = returns[t - 1] * np.exp(-0.5 * lv[t - 1])
+        lv[t] = omega + beta * lv[t - 1] + alpha * (abs(z) - _EG_C) + gamma * z
+        if lv[t] > 20.0:
+            lv[t] = 20.0
+        elif lv[t] < -20.0:
+            lv[t] = -20.0
+    return lv
+
+
+def egarch_neg_log_likelihood(params, returns):
+    omega, alpha, gamma, beta = params
+    lv = egarch_logvar_path(returns, omega, alpha, gamma, beta)
+    return 0.5 * np.sum(np.log(2 * np.pi) + lv + returns ** 2 * np.exp(-lv))
+
+
+def fit_egarch(returns):
+    """EGARCH(1,1), normal innovations. Returns (omega, alpha, gamma, beta)."""
+    bounds = [(-5, 5), (-1, 1.5), (-1, 1), (-0.999, 0.999)]
+    best = None
+    for start in ([0.02, 0.12, -0.06, 0.96], [0.0, 0.2, -0.1, 0.9]):
+        res = minimize(egarch_neg_log_likelihood, start, args=(returns,), method='L-BFGS-B', bounds=bounds)
+        if best is None or res.fun < best.fun:
+            best = res
+    return best.x
+
+
+def gjr_term_structure(params, train, horizon):
+    """Mean variance (percent^2) over the next `horizon` days, from the state at the end of `train`."""
+    omega, alpha, gamma, beta = params[:4]
+    s2 = gjr_variance_path(train, omega, alpha, gamma, beta)[-1]
+    s2_next = omega + (alpha + gamma * (train[-1] < 0)) * train[-1] ** 2 + beta * s2
+    persistence = alpha + gamma / 2 + beta
+    path = np.empty(horizon)
+    path[0] = s2_next
+    for k in range(1, horizon):
+        path[k] = omega + persistence * path[k - 1]
+    return path.mean()
+
+
+def _egarch_mgf(b, alpha, gamma):
+    """E[exp(b * (alpha * (|z| - E|z|) + gamma * z))] for z ~ N(0, 1)."""
+    from scipy.stats import norm as _norm
+    p, m = b * (alpha + gamma), b * (alpha - gamma)
+    return np.exp(-b * alpha * _EG_C) * (np.exp(p * p / 2) * _norm.cdf(p) + np.exp(m * m / 2) * _norm.cdf(m))
+
+
+def egarch_term_structure(params, train, horizon):
+    """
+    Mean EXPECTED variance (percent^2) over the next `horizon` days. ln sigma2 on day t+1 is known at t. For later days,
+    E[sigma2_{t+k}] = exp(omega * sum_{i<k-1} beta^i + beta^(k-1) * ln sigma2_{t+1}) * prod_{m=0}^{k-2} E[exp(beta^m u)],
+    u = alpha(|z| - E|z|) + gamma z with z standard normal, so the exponentiated shocks are averaged exactly,
+    not just the log variance.
+    """
+    omega, alpha, gamma, beta = params[:4]
+    lv = egarch_logvar_path(train, omega, alpha, gamma, beta)
+    z = train[-1] * np.exp(-0.5 * lv[-1])
+    l1 = np.clip(omega + beta * lv[-1] + alpha * (abs(z) - _EG_C) + gamma * z, -20.0, 20.0)
+    out = np.empty(horizon)
+    out[0] = np.exp(l1)
+    prod = 1.0
+    for k in range(2, horizon + 1):
+        prod *= _egarch_mgf(beta ** (k - 2), alpha, gamma)
+        const = omega * sum(beta ** i for i in range(k - 1))
+        out[k - 1] = np.exp(const + beta ** (k - 1) * l1) * prod
+    return out.mean()
+
+
+def sigma2_next_gjr(params, train):
+    omega, alpha, gamma, beta = params[:4]
+    s2 = gjr_variance_path(train, omega, alpha, gamma, beta)[-1]
+    return omega + (alpha + gamma * (train[-1] < 0)) * train[-1] ** 2 + beta * s2
+
+
+def news_impact(shocks, model, params, sigma2_prev):
+    """Next-day variance as a function of today's return shock (percent), holding yesterday's variance at sigma2_prev."""
+    shocks = np.asarray(shocks, dtype=float)
+    if model == 'garch':
+        omega, alpha, beta = params[:3]
+        return omega + alpha * shocks ** 2 + beta * sigma2_prev
+    if model == 'gjr':
+        omega, alpha, gamma, beta = params[:4]
+        return omega + (alpha + gamma * (shocks < 0)) * shocks ** 2 + beta * sigma2_prev
+    omega, alpha, gamma, beta = params[:4]
+    z = shocks / np.sqrt(sigma2_prev)
+    return np.exp(omega + beta * np.log(sigma2_prev) + alpha * (np.abs(z) - _EG_C) + gamma * z)
+

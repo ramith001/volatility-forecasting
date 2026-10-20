@@ -65,7 +65,7 @@ The implementation is validated before being trusted on real data: a return seri
 
 **Single ticker depth.** The full GARCH-vs-ML comparison and VaR backtest were run in depth on JPMorgan Chase specifically; the S&P 500 data was collected and processed but not carried through the full rolling forecast pipeline. Extending the full comparison to the index, and to other individual stocks, is a natural next step.
 
-**Normal innovations assumption.** The GARCH likelihood in the original and Part 1 runs assumes normally distributed return shocks. Part 2 implements Student-t innovations and compares the two (see below): the t model fits far better, but it does not fix the 99% VaR under-coverage, so the remaining gap is not just tail shape. Asymmetric (leverage) effects and skewed innovations were not tried.
+**Normal innovations assumption.** The GARCH likelihood in the original and Part 1 runs assumes normally distributed return shocks. Part 2 implements Student-t innovations and compares the two (see below): the t model fits far better, but it does not fix the 99% VaR under-coverage, so the remaining gap is not just tail shape. Asymmetric (leverage) effects are tried in Part 5, where they do not fix the 99% VaR shortfall either; skewed innovations were not tried.
 
 **VaR backtesting depth.** The original Kupiec-style check used one 209-day out-of-sample period, and Part 2 extended it to a single 750-day window. Part 3 repeats the backtest on three non-overlapping 750-day blocks (October 2017 to October 2026, including the COVID crash), which settles the "single calm window" concern, but it is still only three blocks, two tickers and one rolling-window design (a 750-day refit window, zero-mean returns, GARCH(1,1) only). With 24 block-level tests, about one rejection is expected by chance, and the blocks share training data at their edges. 213 early days could not be scored because the first test day needs 750 days of training data behind it.
 
@@ -183,8 +183,17 @@ Part 1 compared GARCH(1,1) with a Gradient Boosting model on two US equity serie
 
 ![GARCH vs. Gradient Boosting by asset, and pooled forecast error relative to volatility level](chart_part4_generalization.png)
 
----
+## Part 5: Leverage Effects (GJR-GARCH and EGARCH)
 
+The symmetric GARCH(1,1) treats a 3% fall and a 3% rise as equally informative about tomorrow's volatility. Part 5 adds two asymmetric models, fit by maximum likelihood with normal innovations like the symmetric one so that only the variance equation changes: GJR-GARCH, `sigma2_t = omega + (alpha + gamma * 1[r_{t-1} < 0]) r_{t-1}^2 + beta sigma2_{t-1}`, and EGARCH, `ln sigma2_t = omega + beta ln sigma2_{t-1} + alpha (|z_{t-1}| - E|z|) + gamma z_{t-1}`. EGARCH's multi-day variance forecast uses the exact expectation of the exponentiated shocks (checked against a Monte Carlo simulation), not only the expectation of the log variance. The functions are in `garch_utils.py` and `part5_leverage.ipynb` runs the comparison on the ten Part 4 assets (full-sample fits) and on five of them out of sample (JPM, the S&P 500, Apple, gold and Bitcoin, over the same 750 scored days as Part 4, all models refit daily on the trailing 750 returns). No refit failed the constant-variance check described in Part 4.
+
+**The leverage effect is strong in US equities and absent or reversed elsewhere.** After a down day the next day's absolute return is on average 1.29 times that after an up day for the S&P 500, and 1.15 to 1.17 for JPM, Apple and REITs, but 0.96 for gold, 1.00 for long Treasuries and 0.97 for EUR/USD. In the full-sample GJR fit, `gamma` is positive with a likelihood-ratio p-value below 0.001 for JPM (0.137), the S&P 500 (0.241), Apple (0.162), emerging-market equities (0.112) and REITs (0.099), weak for Exxon (0.030, p = 0.011), and not significant for long Treasuries (p = 0.40) and EUR/USD (p = 0.11). Gold has the opposite sign (-0.046, p < 0.001: rises raise volatility more than falls). Bitcoin looks asymmetric under normal innovations (p < 0.001) but not once the innovations are Student-t (p = 0.73), so there the apparent asymmetry comes from fat tails. By AIC, GJR beats the symmetric model on 9 of 10 assets (all but long Treasuries) and EGARCH on 8 of 10; EGARCH has the lowest AIC on six (JPM, the S&P 500, Apple, Exxon, emerging markets, Bitcoin) and GJR on REITs and gold. The improvement is large for the S&P 500 (AIC lower by 123 for GJR and 151 for EGARCH) and JPM (61 and 85). Next-day variance after a -3% day is 2.67 times that after a +3% day for the S&P 500 under GJR (2.57 under EGARCH) and 1.48 times for JPM (1.46), where the symmetric model gives 1.00. The fitted `gamma` has the same sign in every daily refit for JPM, the S&P 500, Apple and gold (GJR means 0.17, 0.15, 0.12 and -0.09).
+
+**Out of sample the asymmetric models help a little, and not significantly.** The 21-day volatility forecast RMSE relative to the symmetric model (GJR / EGARCH) is 0.90 / 0.84 for the S&P 500, 0.94 / 0.93 for Apple, 0.95 / 0.93 for gold, 1.01 / 0.98 for JPM and 1.00 / 1.02 for Bitcoin. None of the Diebold-Mariano p-values is below 0.05 (the smallest is 0.089, S&P 500 GJR). For the one-day density, the mean log score is higher on the S&P 500 by 0.035 per day for GJR (t = 4.4) and 0.029 for EGARCH (t = 2.2), and within 0.016 on the other four assets (t up to 1.6). The asymmetry does not fix VaR coverage: at 99% JPM has 18 breaches under the symmetric model, 18 under GJR and 20 under EGARCH against 7.5 expected (all rejected, p <= 0.001), and on the S&P 500 EGARCH is worse than the symmetric model (16 breaches against 12, p = 0.007) while GJR is about level (13). At 95% the S&P 500 has 45, 36 and 31 breaches (none rejected), so the asymmetric models move the 95% rate toward nominal there. The JPM 99% shortfall in Parts 2 and 3 is therefore not a leverage effect.
+
+![News impact curves for JPM, change in AIC by asset, and out-of-sample 21-day volatility error relative to symmetric GARCH](chart_part5_leverage.png)
+
+---
 ## Files
 
 - `volatility_forecasting.ipynb` -- the original JPM-only, 2014-2024 notebook, left untouched.
@@ -200,6 +209,9 @@ Part 1 compared GARCH(1,1) with a Gradient Boosting model on two US equity serie
 - `part4_generalization.ipynb` -- Part 4: GARCH vs. Gradient Boosting on ten assets and three blocks each, with the corrected forward target (`compute_forward_realized_vol_aligned`, `prepare_vol_data`, `make_blocks`, `rolling_garch_term_structure`, `ml_block_forecast`, `dm_test` and a faster, identical GARCH fit were appended to `garch_utils.py`).
 - `chart_part4_generalization.png` -- GARCH/ML RMSE ratio by asset and block, and pooled error relative to volatility level.
 - `part4_part1_rerun.csv`, `part4_by_block.csv`, `part4_pooled.csv`, `part4_forecasts.csv` -- the numbers behind the Part 4 tables, and every daily forecast.
+- `part5_leverage.ipynb` -- Part 5: GJR-GARCH and EGARCH against the symmetric GARCH(1,1), in sample on ten assets and out of sample on five (the GJR, EGARCH and news-impact functions were appended to `garch_utils.py`).
+- `chart_part5_leverage.png` -- news impact curves, change in AIC by asset and out-of-sample 21-day error.
+- `part5_leverage_descriptive.csv`, `part5_fit_comparison.csv`, `part5_oos_21day.csv`, `part5_oos_1day.csv`, `part5_rolling_gamma.csv` -- the numbers behind the Part 5 tables.
 
 ---
 
