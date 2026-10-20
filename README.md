@@ -218,6 +218,20 @@ The simple regularized models and the GRU are slightly ahead of GARCH on average
 
 ![21-day volatility forecast error relative to GARCH for each ML variant, and the Gradient Boosting feature importances](chart_part6_ml_variants.png)
 
+## Part 7: Combining the GARCH and ML Forecasts
+
+If GARCH and an ML model make different errors, their average can beat both. `part7_ensemble.ipynb` tests this with no new fitting, using the daily 21-day forecasts already produced by Parts 4 and 6 (same target, embargo, blocks and scored days; the two parts' targets agree to 0.00014 percentage points, the difference being revisions to adjusted prices between downloads). It looks at error correlation, equal-weight averages, and weights learned from the previous block (for blocks 2 and 3, a weight on GARCH chosen on a 0 to 1 grid to minimize last block's squared error, against the 50/50 average and an oracle weight chosen on the block itself).
+
+**The errors are highly correlated, which limits what averaging can do.** The correlation between GARCH's forecast errors and an ML model's is 0.84 on average for the Part 1 Gradient Boosting model (0.77 to 0.91 across assets), 0.85 for the GRU, 0.90 for Ridge and 0.94 for HAR. Both kinds of model miss the same volatility shocks.
+
+**Averaging with the Part 1 Gradient Boosting model leaves GARCH about where it was.** Over ten assets the 50/50 average has a mean RMSE ratio to GARCH of 1.001. It beats GARCH on 6 of 10 assets, the Gradient Boosting model on 9 and both on 5. It is better than GARCH by a visible margin on Apple (0.93), gold (0.94), long Treasuries (0.97) and Exxon (0.96), and worse on REITs (1.11) and Bitcoin (1.09); only Bitcoin is significant against GARCH (Diebold-Mariano p = 0.001, in the wrong direction). The average is significantly better than the Gradient Boosting model on gold (p = 0.019) and Bitcoin (p < 0.001).
+
+**Averaging with the better ML models gives a lower error, but mostly because those models are individually better.** On the six Part 6 assets, mean RMSE ratio to GARCH: GARCH plus HAR 0.964, plus Ridge 0.943, plus the GRU 0.931, GARCH plus Ridge plus GRU 0.923, GARCH plus all three 0.927 and, with GARCH left out, HAR plus Ridge plus GRU 0.925. Those compare with 0.961, 0.939 and 0.943 for HAR, Ridge and the GRU alone. GARCH adds nothing once the ML models are averaged, and an ensemble beats the best of HAR, Ridge and the GRU on an asset in only 0 to 3 of the 6 assets (3 for the ML-only average). Of 54 Diebold-Mariano comparisons of an ensemble with a component, 7 have p < 0.05: ensembles including GARCH beat GARCH on Exxon (p between 0.004 and 0.029), the four-model average beats Ridge on Exxon (p = 0.016), and three ensembles beat the GRU on gold (p between 0.018 and 0.037). Nothing is significant on the other four assets.
+
+**Weights learned from the past are worse than a fixed 50/50.** Averaged over asset-blocks, the RMSE is 7.80 for GARCH, 8.43 for the Part 1 Gradient Boosting model, 7.82 for the 50/50 average, 8.01 for the weights learned on the previous block and 7.53 for the oracle weight (20 asset-blocks). For the GRU (12 asset-blocks) the figures are 8.83, 8.41, 8.29, 8.59 and 8.00, and for Ridge 8.83, 8.37, 8.37, 8.55 and 8.20. The learned weight beats the 50/50 average in only 7 of 20, 3 of 12 and 4 of 12 asset-blocks, because the best weight on one block is a poor guide to the next (the average learned weight on GARCH is 0.71, 0.30 and 0.39, close to the oracle averages of 0.66, 0.37 and 0.39, but the block-to-block values are noisy). So the simple average is the version worth using, and the gain over the better single model is small.
+
+![Single models and equal-weight averages on six assets, and GARCH plus Gradient Boosting on ten](chart_part7_ensemble.png)
+
 ---
 ## Files
 
@@ -240,6 +254,9 @@ The simple regularized models and the GRU are slightly ahead of GARCH on average
 - `part6_ml_variants.ipynb` -- Part 6: HAR, Gradient Boosting on four feature sets, Ridge and a numpy GRU against GARCH on six assets (`build_rich_features`, `NumpyGRU` and `make_sequences` were appended to `garch_utils.py`).
 - `chart_part6_ml_variants.png` -- RMSE relative to GARCH by model and asset, and feature importances.
 - `part6_forecasts.csv`, `part6_rmse_pooled.csv`, `part6_rmse_ratio_to_garch.csv`, `part6_by_block.csv`, `part6_dm_tests.csv`, `part6_feature_importance.csv` -- the numbers behind the Part 6 tables, and every daily forecast.
+- `part7_ensemble.ipynb` -- Part 7: error correlation, equal-weight ensembles and weights learned from the previous block, built from the Part 4 and Part 6 forecasts (no new fitting).
+- `chart_part7_ensemble.png` -- single models and ensembles relative to GARCH.
+- `part7_error_correlation.csv`, `part7_ensemble_ten_assets.csv`, `part7_ensemble_six_assets_rmse.csv`, `part7_ensemble_six_assets_ratio.csv`, `part7_ensemble_dm_tests.csv`, `part7_learned_weights.csv`, `part7_learned_weights_summary.csv` -- the numbers behind the Part 7 tables.
 
 ---
 
