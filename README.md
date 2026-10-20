@@ -14,7 +14,9 @@ Volatility forecasting sits at the core of risk management, options pricing and 
 - **Machine learning alternatives:** Gradient Boosting on lagged returns and volatilities (Part 1), then richer feature sets, HAR, Ridge and a GRU written in numpy (Part 6), and averages of GARCH with the ML forecasts (Part 7).
 - **Evaluation:** out-of-sample 21-day volatility forecasts against realized volatility (Parts 1, 4, 6, 7), 5-, 10- and 21-day horizons (Part 8), and Value at Risk backtests with Kupiec and Christoffersen coverage tests, including three non-overlapping 750-day blocks (Parts 1 to 3).
 
-**Data:** Yahoo Finance daily prices from January 2014 to 13 October 2026 (the end date is pinned in each notebook). Parts 1 to 3 use JPMorgan Chase (JPM) and the S&P 500 (^GSPC). Part 4 onward adds Apple, Exxon, emerging-market equities (EEM), REITs (VNQ), gold (GLD), long Treasuries (TLT), EUR/USD and Bitcoin; Parts 5 to 8 use subsets of these ten. Bitcoin trades every day, so its windows cover fewer calendar years.
+**Data:** Yahoo Finance daily prices from January 2014 to 13 October 2026 (the end date is pinned in each notebook). Parts 1 to 3 use JPMorgan Chase (JPM) and the S&P 500 (^GSPC). Part 4 onward adds Apple, Exxon, emerging-market equities (EEM), REITs (VNQ), gold (GLD), long Treasuries (TLT), EUR/USD and Bitcoin; Parts 5 to 8 use subsets of these ten. Bitcoin trades every day, so its windows cover fewer calendar years. `SUMMARY.md` ties the parts together, and the chart below shows one result from each.
+
+![One result from each part](chart_summary.png)
 
 ---
 
@@ -263,6 +265,8 @@ GARCH has the lowest RMSE on 0, 1 and 1 of the six assets at 5, 10 and 21 days (
 - `part8_horizons.ipynb` -- Part 8: GARCH, HAR, Gradient Boosting and naive forecasts at 5, 10 and 21 days, with calibration and persistence checks.
 - `chart_part8_horizons.png` -- relative RMSE, Mincer-Zarnowitz slopes and error relative to the level, by horizon.
 - `part8_forecasts.csv`, `part8_by_horizon.csv`, `part8_mincer_zarnowitz.csv`, `part8_persistence.csv` -- the numbers behind the Part 8 tables, and every daily forecast.
+- `SUMMARY.md` -- Part 10: a short write-up tying the parts together.
+- `part10_summary.ipynb`, `chart_summary.png` -- Part 10: the consolidated chart, drawn from the CSV files the earlier parts saved (no models are run).
 
 ---
 
