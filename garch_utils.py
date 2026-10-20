@@ -696,3 +696,178 @@ def news_impact(shocks, model, params, sigma2_prev):
     z = shocks / np.sqrt(sigma2_prev)
     return np.exp(omega + beta * np.log(sigma2_prev) + alpha * (np.abs(z) - _EG_C) + gamma * z)
 
+
+# ---------------------------------------------------------------------------
+# Part 6: a richer feature set and a sequence model for the ML side
+#
+# Same leakage rules as before: every feature at day t uses data through day t only (checked by a truncation test
+# in the notebook), and the target is the aligned forward volatility over days t+1 .. t+horizon.
+# Feature sets, in the order they are added:
+#   'base'  the 12 features Part 1 used (5 lagged realized vols, 5 lagged returns, 5-day mean |return|, vol trend)
+#   'har'   realized volatility over 5, 21 and 63 days (the heterogeneous autoregressive model's three horizons)
+#   'rich'  base + har + downside and upside semivolatility, high-low range volatility (needs OHLC), the largest
+#           absolute return in 21 days and, when supplied, the VIX level and its 5-day change
+# ---------------------------------------------------------------------------
+def build_rich_features(ohlc, horizon=21, vix=None, n_lags=5):
+    """
+    ohlc: DataFrame with 'Open', 'High', 'Low', 'Close' indexed by date. vix: optional Series of the VIX close on the
+    same dates (known at the close of day t). Returns a DataFrame of features plus 'target_vol', rows with any NaN dropped,
+    and the underlying processed frame (log_return, realized_vol, ...).
+    """
+    frame = pd.DataFrame({'Close': ohlc['Close'].astype(float)})
+    processed = compute_returns_and_vol(frame)
+    r = processed['log_return']
+    feat = pd.DataFrame(index=processed.index)
+    feat['target_vol'] = compute_forward_realized_vol_aligned(processed, horizon=horizon)
+    for lag in range(1, n_lags + 1):
+        feat[f'vol_lag_{lag}'] = processed['realized_vol'].shift(lag - 1)
+        feat[f'return_lag_{lag}'] = r.shift(lag - 1)
+    feat['return_abs_5d_mean'] = r.abs().rolling(5).mean()
+    feat['vol_trend'] = processed['realized_vol'].diff(5)
+    ann = np.sqrt(252) * 100
+    feat['rv5'] = r.rolling(5).std() * ann
+    feat['rv21'] = r.rolling(21).std() * ann
+    feat['rv63'] = r.rolling(63).std() * ann
+    feat['semi_down21'] = np.sqrt((r.clip(upper=0) ** 2).rolling(21).mean()) * ann
+    feat['semi_up21'] = np.sqrt((r.clip(lower=0) ** 2).rolling(21).mean()) * ann
+    hl = np.log(ohlc['High'].astype(float) / ohlc['Low'].astype(float)).reindex(processed.index)
+    feat['range_vol5'] = np.sqrt((hl ** 2).rolling(5).mean() / (4 * np.log(2))) * np.sqrt(252) * 100
+    feat['range_vol21'] = np.sqrt((hl ** 2).rolling(21).mean() / (4 * np.log(2))) * np.sqrt(252) * 100
+    feat['max_abs_ret21'] = r.abs().rolling(21).max() * 100
+    if vix is not None:
+        v = vix.reindex(processed.index).ffill()
+        feat['vix'] = v
+        feat['vix_chg5'] = v.diff(5)
+    return feat.dropna(), processed
+
+
+FEATURE_SETS = {
+    'base': ['vol_lag_1', 'vol_lag_2', 'vol_lag_3', 'vol_lag_4', 'vol_lag_5', 'return_lag_1', 'return_lag_2',
+             'return_lag_3', 'return_lag_4', 'return_lag_5', 'return_abs_5d_mean', 'vol_trend'],
+    'har': ['rv5', 'rv21', 'rv63'],
+}
+FEATURE_SETS['rich'] = (FEATURE_SETS['base'] + ['rv5', 'rv21', 'rv63', 'semi_down21', 'semi_up21', 'range_vol5',
+                                                 'range_vol21', 'max_abs_ret21'])
+FEATURE_SETS['rich_vix'] = FEATURE_SETS['rich'] + ['vix', 'vix_chg5']
+
+
+class NumpyGRU:
+    """
+    A single-layer GRU with a linear read-out of the last hidden state, trained by minibatch Adam with manual
+    backpropagation through time. Written in numpy because PyTorch is not available for this Python build.
+        z = sigmoid(Wz x + Uz h + bz)      r = sigmoid(Wr x + Ur h + br)
+        n = tanh(Wn x + Un (r * h) + bn)   h' = (1 - z) * n + z * h
+        y = Wo h_T + bo
+    Inputs X: (B, T, D). Output: (B,). Loss: mean squared error.
+    """
+    def __init__(self, n_in, n_hidden=16, seed=0):
+        rng = np.random.default_rng(seed)
+        H, D = n_hidden, n_in
+        s_in, s_h = 1 / np.sqrt(D), 1 / np.sqrt(H)
+        self.H, self.D = H, D
+        self.p = {
+            'Wz': rng.normal(0, s_in, (D, H)), 'Uz': rng.normal(0, s_h, (H, H)), 'bz': np.zeros(H),
+            'Wr': rng.normal(0, s_in, (D, H)), 'Ur': rng.normal(0, s_h, (H, H)), 'br': np.zeros(H),
+            'Wn': rng.normal(0, s_in, (D, H)), 'Un': rng.normal(0, s_h, (H, H)), 'bn': np.zeros(H),
+            'Wo': rng.normal(0, s_h, (H,)), 'bo': np.zeros(1),
+        }
+
+    @staticmethod
+    def _sig(a):
+        return 1 / (1 + np.exp(-np.clip(a, -30, 30)))
+
+    def forward(self, X, cache=False):
+        p, B, T = self.p, X.shape[0], X.shape[1]
+        h = np.zeros((B, self.H))
+        steps = []
+        for t in range(T):
+            x = X[:, t, :]
+            z = self._sig(x @ p['Wz'] + h @ p['Uz'] + p['bz'])
+            r = self._sig(x @ p['Wr'] + h @ p['Ur'] + p['br'])
+            n = np.tanh(x @ p['Wn'] + (r * h) @ p['Un'] + p['bn'])
+            h_new = (1 - z) * n + z * h
+            if cache:
+                steps.append((x, h, z, r, n))
+            h = h_new
+        y = h @ p['Wo'] + p['bo'][0]
+        return (y, steps, h) if cache else y
+
+    def loss_and_grads(self, X, y_true):
+        p = self.p
+        y, steps, h_T = self.forward(X, cache=True)
+        B = X.shape[0]
+        err = y - y_true
+        loss = float(np.mean(err ** 2))
+        g = {k: np.zeros_like(v) for k, v in p.items()}
+        dy = 2 * err / B
+        g['Wo'] = h_T.T @ dy
+        g['bo'] = np.array([dy.sum()])
+        dh = np.outer(dy, p['Wo'])
+        for t in range(len(steps) - 1, -1, -1):
+            x, h_prev, z, r, n = steps[t]
+            dn = dh * (1 - z)
+            dz = dh * (h_prev - n)
+            dh_prev = dh * z
+            dan = dn * (1 - n ** 2)
+            g['Wn'] += x.T @ dan
+            g['bn'] += dan.sum(0)
+            g['Un'] += (r * h_prev).T @ dan
+            drh = dan @ p['Un'].T
+            dr = drh * h_prev
+            dh_prev += drh * r
+            daz = dz * z * (1 - z)
+            dar = dr * r * (1 - r)
+            g['Wz'] += x.T @ daz
+            g['bz'] += daz.sum(0)
+            g['Uz'] += h_prev.T @ daz
+            g['Wr'] += x.T @ dar
+            g['br'] += dar.sum(0)
+            g['Ur'] += h_prev.T @ dar
+            dh_prev += daz @ p['Uz'].T + dar @ p['Ur'].T
+            dh = dh_prev
+        return loss, g
+
+    def fit(self, X, y, X_val=None, y_val=None, epochs=40, batch=64, lr=3e-3, weight_decay=1e-4, patience=8, seed=0):
+        rng = np.random.default_rng(seed)
+        m = {k: np.zeros_like(v) for k, v in self.p.items()}
+        v = {k: np.zeros_like(val) for k, val in self.p.items()}
+        best, best_p, bad, step = np.inf, None, 0, 0
+        n = len(X)
+        for ep in range(epochs):
+            order = rng.permutation(n)
+            for i in range(0, n, batch):
+                idx = order[i:i + batch]
+                _, g = self.loss_and_grads(X[idx], y[idx])
+                step += 1
+                for k in self.p:
+                    grad = np.clip(g[k], -5, 5) + weight_decay * self.p[k]
+                    m[k] = 0.9 * m[k] + 0.1 * grad
+                    v[k] = 0.999 * v[k] + 0.001 * grad ** 2
+                    self.p[k] -= lr * (m[k] / (1 - 0.9 ** step)) / (np.sqrt(v[k] / (1 - 0.999 ** step)) + 1e-8)
+            if X_val is not None:
+                val = float(np.mean((self.forward(X_val) - y_val) ** 2))
+                if val < best - 1e-6:
+                    best, best_p, bad = val, {k: a.copy() for k, a in self.p.items()}, 0
+                else:
+                    bad += 1
+                    if bad >= patience:
+                        break
+        if best_p is not None:
+            self.p = best_p
+        return self
+
+    def predict(self, X):
+        return self.forward(X)
+
+
+def make_sequences(channels, ml, processed, window=42):
+    """
+    channels: DataFrame of per-day inputs (aligned to `processed.index`). For each row of `ml` (a day t) returns the
+    (n, window, D) array of the channels on days t-window+1 .. t. Only past and present days enter. Rows that do not
+    have a full window are dropped; returns (X, kept_index).
+    """
+    row_pos = processed.index.get_indexer(ml.index)
+    arr = channels.values
+    keep = row_pos >= window - 1
+    X = np.stack([arr[p - window + 1:p + 1] for p in row_pos[keep]])
+    return X, ml.index[keep]

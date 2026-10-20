@@ -193,6 +193,31 @@ The symmetric GARCH(1,1) treats a 3% fall and a 3% rise as equally informative a
 
 ![News impact curves for JPM, change in AIC by asset, and out-of-sample 21-day volatility error relative to symmetric GARCH](chart_part5_leverage.png)
 
+## Part 6: Richer Features and a Sequence Model on the ML Side
+
+Part 4 compared GARCH with the Part 1 machine learning model, Gradient Boosting on 12 lagged features. A better-built ML model might change the ranking, so Part 6 keeps the same design (aligned 21-day target, features through day t only, one model per block trained with the embargo, the same three 250-day blocks and scored days as Part 4) and varies the ML side on six assets: JPM, the S&P 500, Apple, Exxon, emerging-market equities and gold. A truncation test confirms every feature row at day t is unchanged when the data is cut off at day t, including the range and VIX features. The models are HAR (least squares on realized volatility over 5, 21 and 63 days), Gradient Boosting on four feature sets (Part 1's 12 features, those plus the HAR horizons, a rich set adding downside and upside semivolatility, the largest absolute return in 21 days and high-low range volatility, and the rich set plus the VIX level and its 5-day change), Ridge regression on the rich set, and a GRU over the last 42 days of return, absolute return, log high-low range and VIX. PyTorch is not available for this Python build, so the GRU is written in numpy (`NumpyGRU` in `garch_utils.py`, trained with Adam and backpropagation through time; its gradients match finite differences to 1.5e-7). Each block's GRU forecast is the average of three seeds, with 15% of the training sequences held out for early stopping.
+
+**The ranking against GARCH depends on which ML model is used.** RMSE relative to GARCH, averaged over the six assets (below 1 beats GARCH):
+
+| Model | Mean RMSE ratio to GARCH |
+|---|---|
+| Ridge on the rich features | 0.94 |
+| GRU | 0.94 |
+| HAR | 0.96 |
+| Gradient Boosting, Part 1 features | 1.04 |
+| Gradient Boosting, Part 1 features plus HAR horizons | 1.08 |
+| Gradient Boosting, rich features | 1.11 |
+| Gradient Boosting, rich features plus VIX | 1.17 |
+| Naive (trailing 21-day volatility) | 1.13 |
+
+The simple regularized models and the GRU are slightly ahead of GARCH on average, and the Gradient Boosting models are behind it, increasingly so as features are added. By asset, the GRU's ratio is 0.85 for the S&P 500, 0.87 for Apple, 0.90 for Exxon, 0.97 for emerging markets, 0.99 for JPM and 1.08 for gold; Ridge's is 0.87, 0.91, 0.95, 0.95, 1.02 and 0.93. Across the 18 asset-blocks the lowest RMSE goes to the GRU 6 times, GARCH 3, Ridge 3, HAR 2, Gradient Boosting on base plus HAR features 2, and the other two Gradient Boosting variants once each; Ridge and the GRU beat GARCH in 11 of 18 and HAR in 9.
+
+**The evidence is weak.** Pooled Diebold-Mariano tests (Newey-West, 20 lags) of each model against GARCH find one significantly better pairing (HAR on Exxon, p = 0.025) and one significantly worse (Gradient Boosting on base plus HAR features on JPM, p = 0.031) out of 48; the GRU's smallest p-value is 0.062 (Exxon), and its other p-values are 0.135 to 0.803. So the supportable statement is that GARCH is not clearly better than a well-built ML model: Part 4's lead for GARCH was a lead over Gradient Boosting on lagged features, and simple linear models on the same kind of information, or a small recurrent network, are at least level with it.
+
+**More features made Gradient Boosting worse.** VIX is the single most important feature in the rich-plus-VIX model (25% of the importance, followed by the largest 21-day absolute return, the 63-day volatility and the 21-day range volatility), yet adding it raised the RMSE ratio from 1.11 to 1.17, with the largest damage on JPM (1.30 to 1.44). The importance shows what the trees split on, not that the splits generalize. A plausible reason, not tested here, is that trees predict within the range of levels seen in training and the VIX and volatility levels in the test blocks differ from it. The linear models and the GRU, fed standardized inputs, do not have that limit.
+
+![21-day volatility forecast error relative to GARCH for each ML variant, and the Gradient Boosting feature importances](chart_part6_ml_variants.png)
+
 ---
 ## Files
 
@@ -212,6 +237,9 @@ The symmetric GARCH(1,1) treats a 3% fall and a 3% rise as equally informative a
 - `part5_leverage.ipynb` -- Part 5: GJR-GARCH and EGARCH against the symmetric GARCH(1,1), in sample on ten assets and out of sample on five (the GJR, EGARCH and news-impact functions were appended to `garch_utils.py`).
 - `chart_part5_leverage.png` -- news impact curves, change in AIC by asset and out-of-sample 21-day error.
 - `part5_leverage_descriptive.csv`, `part5_fit_comparison.csv`, `part5_oos_21day.csv`, `part5_oos_1day.csv`, `part5_rolling_gamma.csv` -- the numbers behind the Part 5 tables.
+- `part6_ml_variants.ipynb` -- Part 6: HAR, Gradient Boosting on four feature sets, Ridge and a numpy GRU against GARCH on six assets (`build_rich_features`, `NumpyGRU` and `make_sequences` were appended to `garch_utils.py`).
+- `chart_part6_ml_variants.png` -- RMSE relative to GARCH by model and asset, and feature importances.
+- `part6_forecasts.csv`, `part6_rmse_pooled.csv`, `part6_rmse_ratio_to_garch.csv`, `part6_by_block.csv`, `part6_dm_tests.csv`, `part6_feature_importance.csv` -- the numbers behind the Part 6 tables, and every daily forecast.
 
 ---
 
