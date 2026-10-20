@@ -372,3 +372,175 @@ def coverage_row(hits, p):
     c = christoffersen(hits, p)
     return {'n_days': n, 'breaches': x, 'expected': round(p * n, 1), 'breach_rate_%': 100 * x / n,
             'nominal_%': 100 * p, 'kupiec_p': p_pof, 'indep_p': c['p_ind'], 'cond_cov_p': c['p_cc']}
+
+
+# ---------------------------------------------------------------------------
+# Part 4: aligned forward target, multi-block GARCH-vs-ML evaluation, Diebold-Mariano test
+#
+# Everything above is unchanged. compute_forward_realized_vol (Part 1) returns the realized volatility
+# over days t+21 .. t+41, not t+1 .. t+21 as its docstring says: it applies
+# rolling(horizon).std() (which already gives the std of the NEXT `horizon` days after the shift(-horizon))
+# and then shifts by another horizon-1 days. Part 1's GARCH-vs-ML RMSEs were scored against that
+# target. The functions below use the target that matches the docstring and the GARCH forecast, and are
+# what Parts 4-8 use. The original function is left as it was so Part 1 still reproduces.
+# ---------------------------------------------------------------------------
+def compute_forward_realized_vol_aligned(df, horizon=21):
+    """Annualized std (in %) of the daily log returns over days t+1 .. t+horizon, known at the close of day t."""
+    return df['log_return'].rolling(horizon).std().shift(-horizon) * np.sqrt(252) * 100
+
+
+def build_ml_features_aligned(df, n_lags=5, horizon=21):
+    """Same features as build_ml_features (all use data up to and including day t), with the aligned target."""
+    feat = pd.DataFrame(index=df.index)
+    feat['target_vol'] = compute_forward_realized_vol_aligned(df, horizon=horizon)
+    for lag in range(1, n_lags + 1):
+        feat[f'vol_lag_{lag}'] = df['realized_vol'].shift(lag - 1)
+        feat[f'return_lag_{lag}'] = df['log_return'].shift(lag - 1)
+    feat['return_abs_5d_mean'] = df['log_return'].abs().rolling(5).mean()
+    feat['vol_trend'] = df['realized_vol'].diff(5)
+    return feat.dropna()
+
+
+def eval_positions(n, n_eval, max_horizon=21):
+    """Positions (row numbers) of the last `n_eval` days that have a complete forward window of max_horizon days."""
+    return np.arange(n - max_horizon - n_eval, n - max_horizon)
+
+
+def rolling_garch_term_structure(returns, positions, train_window=750, horizons=(21,), fitter=None,
+                                  term_structure=None, nll=None):
+    """
+    For each row number in `positions`, fit the model on the `train_window` returns ending at and INCLUDING that
+    day (information known at that day's close) and forecast the average variance over the next h days, for each
+    h in `horizons`. Returns a DataFrame indexed by date with annualized volatility forecasts (%) in columns
+    f'h{h}' and the fitted parameters in 'p0', 'p1', ...
+
+    fitter(train_pct) -> parameter vector; term_structure(params, train_pct, horizon) -> mean variance over the next
+    `horizon` days (percent^2). The defaults are the repo's GARCH(1,1): fit_garch and garch_term_structure_forecast.
+
+    Failed fits. If `nll` (nll(params, train_pct)) is given, each fit is checked against the constant-variance
+    model, which every model here nests: a maximum-likelihood fit cannot have a higher negative log-likelihood than
+    variance = sample variance. A fit that does (or has non-finite parameters) is a failed optimization, and the
+    previous day's parameters are used instead (the constant-variance parameters if there is no previous day). The
+    number of such days is returned in the frame's `attrs['n_fit_failures']`.
+    """
+    fitter = fitter or fit_garch
+    r_pct = returns.values * 100
+    rows, last_good, failures = [], None, 0
+    for i in positions:
+        train = r_pct[max(0, i - train_window + 1):i + 1]
+        params = fitter(train)
+        if nll is not None:
+            v = np.var(train)
+            nll_const = 0.5 * len(train) * (np.log(2 * np.pi) + np.log(v) + 1.0)
+            if not np.all(np.isfinite(params)) or nll(params, train) > nll_const + 1e-6:
+                failures += 1
+                params = last_good if last_good is not None else params
+        last_good = params
+        row = {'date': returns.index[i]}
+        if term_structure is None:
+            omega, alpha, beta = params[:3]
+            last_s2 = _garch_filter(omega, alpha, beta, train)[-1]
+        for h in horizons:
+            if term_structure is None:
+                _, avg_var = garch_term_structure_forecast(train[-1], last_s2, omega, alpha, beta, horizon=h)
+            else:
+                avg_var = term_structure(params, train, h)
+            row[f'h{h}'] = np.sqrt(avg_var) * np.sqrt(252)
+        for k, p in enumerate(params):
+            row[f'p{k}'] = p
+        rows.append(row)
+    out = pd.DataFrame(rows).set_index('date')
+    out.attrs['n_fit_failures'] = failures
+    return out
+
+
+def fit_garch_fast(returns):
+    """Same objective as garch_neg_log_likelihood, with the variance recursion done by lfilter instead of a Python
+    loop (it is a first-order linear filter). Same optimizer, bounds and start values as fit_garch."""
+    bounds = [(1e-6, None), (0, 1), (0, 1)]
+    constraints = [{'type': 'ineq', 'fun': lambda p: 0.999 - p[1] - p[2]}]
+
+    def nll(params):
+        return garch_neg_log_likelihood_fast(params, returns)
+    return minimize(nll, [0.1, 0.1, 0.8], method='SLSQP', bounds=bounds, constraints=constraints,
+                    options={'maxiter': 300}).x
+
+
+def garch_neg_log_likelihood_fast(params, returns):
+    omega, alpha, beta = params
+    s2 = np.maximum(_garch_filter(omega, alpha, beta, returns), 1e-8)
+    return 0.5 * np.sum(np.log(2 * np.pi) + np.log(s2) + returns ** 2 / s2)
+
+
+def _garch_filter(omega, alpha, beta, returns):
+    """sigma2[0] = var(returns); sigma2[t] = omega + alpha r[t-1]^2 + beta sigma2[t-1], via lfilter."""
+    n = len(returns)
+    drive = np.empty(n)
+    drive[0] = np.var(returns)
+    drive[1:] = omega + alpha * returns[:-1] ** 2
+    # y[0] = drive[0]; y[t] = drive[t] + beta*y[t-1]
+    return lfilter([1.0], [1.0, -beta], drive)
+
+
+def dm_test(loss_a, loss_b, lag):
+    """
+    Diebold-Mariano test of equal expected loss, with a Newey-West (Bartlett) long-run variance at `lag` and the
+    Harvey-Leybourne-Newbold small-sample correction. d = loss_a - loss_b: a NEGATIVE statistic means model A has
+    the lower loss. `lag` should be at least horizon - 1 because the forward targets overlap. -> (statistic, p-value)
+    """
+    d = np.asarray(loss_a, dtype=float) - np.asarray(loss_b, dtype=float)
+    n = len(d)
+    dc = d - d.mean()
+    lrv = dc @ dc / n
+    for k in range(1, lag + 1):
+        lrv += 2 * (1 - k / (lag + 1)) * (dc[k:] @ dc[:-k]) / n
+    stat = d.mean() / np.sqrt(lrv / n)
+    h = lag + 1
+    corr = np.sqrt((n + 1 - 2 * h + h * (h - 1) / n) / n)
+    stat *= corr
+    from scipy.stats import t as _t
+    return float(stat), float(2 * _t.sf(abs(stat), n - 1))
+
+
+def prepare_vol_data(close, horizon=21, n_lags=5):
+    """Daily log returns, 21-day realized vol and the aligned ML feature/target table for one price series."""
+    frame = pd.DataFrame({'Close': pd.Series(close).astype(float)})
+    processed = compute_returns_and_vol(frame)
+    ml = build_ml_features_aligned(processed, n_lags=n_lags, horizon=horizon)
+    return processed, ml
+
+
+def make_blocks(n, n_blocks=3, block_len=250, horizon=21):
+    """Non-overlapping blocks of `block_len` evaluation days aligned to the end of the usable data (the last
+    `horizon` days have no complete forward window and are never scored). Returns {label: row numbers}."""
+    pos = eval_positions(n, n_blocks * block_len, horizon)
+    return {f'block {k + 1}': pos[k * block_len:(k + 1) * block_len] for k in range(n_blocks)}
+
+
+def default_gbr(random_state=42):
+    """The Gradient Boosting settings Part 1 used."""
+    from sklearn.ensemble import GradientBoostingRegressor
+    return GradientBoostingRegressor(n_estimators=200, max_depth=3, learning_rate=0.05, random_state=random_state)
+
+
+def ml_block_forecast(processed, ml, positions, embargo=22, model_factory=None, feature_cols=None):
+    """
+    Train one model on every ml row whose forward window is complete before the block starts (row number
+    <= positions[0] - embargo; with a 21-day target and embargo 22 the last training target ends one day before the
+    first scored day) and predict the block. embargo=0 reproduces Part 1's split, which trained on targets that reach
+    into the test period. Returns (predictions Series indexed by date, fitted model).
+    """
+    model = (model_factory or default_gbr)()
+    cols = feature_cols or [c for c in ml.columns if c != 'target_vol']
+    row_pos = processed.index.get_indexer(ml.index)
+    train = ml[row_pos <= positions[0] - embargo]
+    model.fit(train[cols], train['target_vol'])
+    dates = processed.index[positions]
+    return pd.Series(model.predict(ml.loc[dates, cols]), index=dates, name='ml'), model
+
+
+def score_forecasts(actual, forecast):
+    """RMSE, MAE and mean error (forecast minus actual) of a volatility forecast, in annualized percentage points."""
+    e = np.asarray(forecast, dtype=float) - np.asarray(actual, dtype=float)
+    return {'rmse': float(np.sqrt(np.mean(e ** 2))), 'mae': float(np.mean(np.abs(e))), 'bias': float(np.mean(e))}
+

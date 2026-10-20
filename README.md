@@ -2,6 +2,8 @@
 ### Built on Real Market Data
 **Ramith Vaid | NTU Singapore | Data Science & Artificial Intelligence**
 
+> **Correction added 2026-10-20, after Part 4.** The forward realized-volatility target used by the original notebook and Part 1 covers days t+21 to t+41, not the next 21 days (t+1 to t+21) its description says: `compute_forward_realized_vol` applies a second shift after `rolling(h).std()` had already looked forward. GARCH's forecast of days t+1 to t+21 was therefore scored against a window that starts 20 days later, and the ML model was trained on a target that was one month stale. Part 4 uses the corrected target and re-runs Part 1's comparison: GARCH still has the lower error on both tickers, but by less (GARCH/ML RMSE ratio 0.87 to 0.93 on JPM, 0.74 to 0.89 on the S&P 500). The Part 1 text below is unchanged and its RMSE figures (4.17 vs. 4.82, 3.47 vs. 4.70) are the ones produced by the misaligned target. The VaR results (Parts 1 to 3) use returns only and are not affected.
+
 ---
 
 ## Overview
@@ -164,6 +166,25 @@ Part 2 scored both models on one 750-day window (October 2023 to October 2026), 
 
 ---
 
+## Part 4: Does GARCH Over ML Generalize?
+
+Part 1 compared GARCH(1,1) with a Gradient Boosting model on two US equity series and one 250-day window. Part 4 repeats the comparison on ten assets and three non-overlapping windows each, and corrects the forward target (see the note at the top). The assets are JPM, the S&P 500, Apple, Exxon, emerging-market equities (EEM), REITs (VNQ), gold (GLD), long Treasuries (TLT), EUR/USD and Bitcoin. For each, the last 750 days with a complete 21-day forward window are split into three 250-day blocks (September 2023 to September 2026 for most assets; Bitcoin trades every day, so its 750 days start in September 2024). GARCH is refit every day on the trailing 750 returns, with the forecast made at the close of day t from data through day t. One Gradient Boosting model (Part 1's settings) is trained per block on rows whose forward window ends before the block starts, instead of Part 1's split, which trained on 21 rows whose targets reached into the test period. A naive forecast (the trailing 21-day realized volatility) is included as a reference. Losses are compared with a Diebold-Mariano test using 20 Newey-West lags because consecutive 21-day targets overlap. Every GARCH refit is checked against a constant-variance model, which GARCH nests, and none of the 7,500 fits failed that check.
+
+**The corrected target narrows Part 1's gap but does not reverse it.** Part 1's two comparisons, re-run three ways (RMSE in annualized percentage points, GARCH / ML, with their ratio):
+
+| | Part 1 as published | Corrected target | Corrected target and embargo |
+|---|---|---|---|
+| JPM | 4.17 / 4.82 (0.87) | 4.08 / 4.35 (0.94) | 4.08 / 4.37 (0.93) |
+| S&P 500 | 3.47 / 4.70 (0.74) | 3.37 / 3.87 (0.87) | 3.37 / 3.78 (0.89) |
+
+**Across ten assets, GARCH is usually ahead, by a modest and mostly not statistically clear margin.** GARCH has the lowest RMSE in 18 of the 30 asset-blocks, the ML model in 8 and the naive forecast in 4. GARCH beats ML in 20 of 30 asset-blocks and on 8 of 10 assets pooled; ML is ahead on Apple (GARCH/ML RMSE ratio 1.08) and on gold (1.01). Pooled ratios run from 0.73 (REITs) to 1.08 (Apple): 0.85 for the S&P 500, 0.82 for Bitcoin, 0.92 for JPM, 0.94 for emerging-market equities, and between 0.97 and 0.98 for Exxon, long Treasuries and EUR/USD. The Diebold-Mariano test separates GARCH from ML on one asset only, Bitcoin (p < 0.001); on the other nine the p-values are between 0.19 and 0.91. GARCH beats the naive forecast on all ten assets pooled, while the ML model beats it on seven. All the forecasts are noisy: pooled RMSE is 27% to 54% of the mean realized volatility for GARCH.
+
+**The lead is not stable over time.** The median GARCH/ML ratio across the ten assets is 0.92 in the oldest block, 0.89 in the middle one and 1.00 in the most recent, where the lowest RMSE goes to GARCH on four assets, to ML on four and to the naive forecast on two. Part 1's conclusion that GARCH beats ML was drawn from one recent window, so this is the window where the two are closest.
+
+![GARCH vs. Gradient Boosting by asset, and pooled forecast error relative to volatility level](chart_part4_generalization.png)
+
+---
+
 ## Files
 
 - `volatility_forecasting.ipynb` -- the original JPM-only, 2014-2024 notebook, left untouched.
@@ -176,6 +197,9 @@ Part 2 scored both models on one 750-day window (October 2023 to October 2026), 
 - `part3_multiwindow_var.ipynb` -- Part 3: the VaR backtest on three non-overlapping 750-day blocks plus a pooled test (`block_slices`, `var_hits` and `coverage_row` were appended to `garch_utils.py`).
 - `chart_part3_multiwindow.png` -- breach rate by block, normal vs. t, both tickers and levels.
 - `part3_block_coverage.csv`, `part3_pooled_coverage.csv`, `part3_block_diagnostics.csv`, `part3_blocks.csv` -- the numbers behind the Part 3 tables.
+- `part4_generalization.ipynb` -- Part 4: GARCH vs. Gradient Boosting on ten assets and three blocks each, with the corrected forward target (`compute_forward_realized_vol_aligned`, `prepare_vol_data`, `make_blocks`, `rolling_garch_term_structure`, `ml_block_forecast`, `dm_test` and a faster, identical GARCH fit were appended to `garch_utils.py`).
+- `chart_part4_generalization.png` -- GARCH/ML RMSE ratio by asset and block, and pooled error relative to volatility level.
+- `part4_part1_rerun.csv`, `part4_by_block.csv`, `part4_pooled.csv`, `part4_forecasts.csv` -- the numbers behind the Part 4 tables, and every daily forecast.
 
 ---
 
