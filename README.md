@@ -232,6 +232,26 @@ If GARCH and an ML model make different errors, their average can beat both. `pa
 
 ![Single models and equal-weight averages on six assets, and GARCH plus Gradient Boosting on ten](chart_part7_ensemble.png)
 
+## Part 8: Multi-Step-Ahead Evaluation (5, 10 and 21 Days)
+
+Every forecast so far was scored at 21 days. `part8_horizons.ipynb` evaluates the same GARCH term-structure code (`garch_term_structure_forecast`) at 5, 10 and 21 days on six assets (JPM, the S&P 500, Apple, Exxon, gold and long Treasuries), on the same 750 scored days as Part 4, so every horizon uses identical dates. For each horizon the target is the realized volatility over days t+1 to t+h. GARCH is refit daily and gives all three horizons from one fit; the naive forecast is the trailing h-day realized volatility; HAR and Gradient Boosting (Part 1 features) are trained per horizon on rows that end 22 days before each block starts. No refit failed the constant-variance check.
+
+**GARCH is level with HAR and ahead of the naive forecast at every horizon.** Mean RMSE relative to GARCH over the six assets (below 1 beats GARCH):
+
+| Horizon | Naive | HAR | Gradient Boosting | GARCH RMSE as % of mean realized volatility |
+|---|---|---|---|---|
+| 5 days | 1.21 | 0.98 | 1.01 | 58% |
+| 10 days | 1.20 | 0.98 | 1.04 | 47% |
+| 21 days | 1.12 | 0.96 | 1.04 | 40% |
+
+GARCH has the lowest RMSE on 0, 1 and 1 of the six assets at 5, 10 and 21 days (HAR on 3, 4 and 3, Gradient Boosting on 3, 1 and 2). The differences between GARCH and HAR or Gradient Boosting are not statistically clear (Diebold-Mariano p < 0.05 on 0 of 6 assets at 5 and 10 days and 1 of 6 at 21 days for HAR, and on none for Gradient Boosting), while GARCH beats the naive forecast significantly on 5 of 6 assets at 5 days, 4 of 6 at 10 days and none at 21 days. Forecast error is large relative to the level and shrinks with the horizon.
+
+**The GARCH term structure is not calibrated: its forecasts are too spread out and biased high.** A Mincer-Zarnowitz regression of realized on forecast volatility gives a slope of 0.61, 0.54 and 0.50 at 5, 10 and 21 days (averaged over the six assets; 1 would be calibrated), against 0.66, 0.65 and 0.70 for HAR. Realized volatility moves only about half as much as GARCH's forecasts say, more so at longer horizons, and the R-squared of realized on forecast is only 0.13 to 0.14. GARCH over-forecasts by 2.0, 1.2 and 0.7 percentage points on average at 5, 10 and 21 days, against -0.06 to -0.19 for Gradient Boosting and +0.08 to -0.12 for HAR; the largest are Apple (+3.6 at 5 days) and JPM (+2.9). Shrinking the GARCH forecasts toward the average level would reduce their error, which HAR and the boosting model do implicitly. This is the same upward bias seen in the pooled 21-day results of Part 4.
+
+**Fitted persistence is near 0.99 for most assets but not JPM.** The median `alpha + beta` over the 750 daily refits is 0.99 for long Treasuries, 0.988 for the S&P 500, 0.986 for Exxon, 0.985 for Apple and 0.961 for gold (half-lives of 17 to 67 days). For JPM it is 0.75 (half-life 2.4 days; range 0.64 to 0.99 across refits). The autocorrelation of the trailing 21-day volatility at a lag of 21 days is similar for JPM (0.475) and the S&P 500 (0.485), so JPM's fits give much faster mean reversion than its realized volatility shows. Why was not investigated.
+
+![Other models relative to GARCH by horizon, Mincer-Zarnowitz calibration of the GARCH term structure, and GARCH error relative to the volatility level](chart_part8_horizons.png)
+
 ---
 ## Files
 
@@ -257,6 +277,9 @@ If GARCH and an ML model make different errors, their average can beat both. `pa
 - `part7_ensemble.ipynb` -- Part 7: error correlation, equal-weight ensembles and weights learned from the previous block, built from the Part 4 and Part 6 forecasts (no new fitting).
 - `chart_part7_ensemble.png` -- single models and ensembles relative to GARCH.
 - `part7_error_correlation.csv`, `part7_ensemble_ten_assets.csv`, `part7_ensemble_six_assets_rmse.csv`, `part7_ensemble_six_assets_ratio.csv`, `part7_ensemble_dm_tests.csv`, `part7_learned_weights.csv`, `part7_learned_weights_summary.csv` -- the numbers behind the Part 7 tables.
+- `part8_horizons.ipynb` -- Part 8: GARCH, HAR, Gradient Boosting and naive forecasts at 5, 10 and 21 days, with calibration and persistence checks.
+- `chart_part8_horizons.png` -- relative RMSE, Mincer-Zarnowitz slopes and error relative to the level, by horizon.
+- `part8_forecasts.csv`, `part8_by_horizon.csv`, `part8_mincer_zarnowitz.csv`, `part8_persistence.csv` -- the numbers behind the Part 8 tables, and every daily forecast.
 
 ---
 
